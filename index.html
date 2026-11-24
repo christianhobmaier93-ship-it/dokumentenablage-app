@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Dokumente</title>
+<meta name="apple-mobile-web-app-title" content="Dokumente">
+<link rel="apple-touch-icon" href="icon.png">
+<style>
+:root{--bg:#f6f6f4;--card:#fff;--ink:#1d1d1b;--quiet:#6b6b66;--line:#e3e2dd;--accent:#2f5d8a;--accent-ink:#fff;--warn:#b45309;--bad:#b42318;--good:#1f7a4d}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#151514;--card:#1f1f1d;--ink:#ecebe6;--quiet:#a3a29c;--line:#34332f;--accent:#7fb0e0;--accent-ink:#0d1b29;--warn:#f0a35b;--bad:#f2867a;--good:#6cc79a}}
+:root[data-theme="dark"]{--bg:#151514;--card:#1f1f1d;--ink:#ecebe6;--quiet:#a3a29c;--line:#34332f;--accent:#7fb0e0;--accent-ink:#0d1b29;--warn:#f0a35b;--bad:#f2867a;--good:#6cc79a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:env(safe-area-inset-top) 0 calc(72px + env(safe-area-inset-bottom))}
+header{padding:16px 16px 8px;display:flex;justify-content:space-between;align-items:center}
+h1{font-size:24px;margin:0}
+main{padding:0 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:10px 0}
+.row{display:flex;gap:8px;align-items:center;justify-content:space-between}
+.t{font-weight:600}.q{color:var(--quiet);font-size:14px}
+.betrag{font-weight:600;white-space:nowrap}
+.faellig{color:var(--warn)}.ueber{color:var(--bad);font-weight:600}
+button,.btn{font:inherit;border:0;border-radius:10px;padding:10px 14px;background:var(--accent);color:var(--accent-ink);font-weight:600;text-decoration:none;display:inline-block;text-align:center}
+button.ghost{background:transparent;color:var(--accent);border:1px solid var(--line)}
+button:disabled{opacity:.5}
+input,select{font:inherit;width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink)}
+nav{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--line);display:flex;padding-bottom:env(safe-area-inset-bottom)}
+nav button{flex:1;background:none;color:var(--quiet);border-radius:0;padding:10px 0 12px;font-size:12px;font-weight:500}
+nav button.an{color:var(--accent);font-weight:700}
+nav span{display:block;font-size:20px;line-height:1.2}
+.badge{background:var(--bad);color:#fff;border-radius:9px;font-size:11px;padding:0 6px;margin-left:2px}
+.leer{color:var(--quiet);text-align:center;padding:32px 0}
+.aktionen{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.aktionen>*{flex:1}
+.ok{color:var(--good)}
+.hinweis{font-size:14px;color:var(--quiet);margin:8px 0}
+#toast{position:fixed;left:16px;right:16px;bottom:calc(84px + env(safe-area-inset-bottom));background:var(--ink);color:var(--bg);padding:12px;border-radius:10px;display:none;text-align:center}
+</style>
+</head>
+<body>
+<header><h1 id="titel">Dokumente</h1><button class="ghost" id="neu" title="Neu laden">↻</button></header>
+<main id="inhalt"><p class="leer">Lädt …</p></main>
+<nav id="nav" hidden>
+  <button data-tab="offen"><span>€</span>Offen<b class="badge" id="b-offen" hidden></b></button>
+  <button data-tab="pruefen"><span>?</span>Prüfen<b class="badge" id="b-pruefen" hidden></b></button>
+  <button data-tab="scan"><span>＋</span>Scannen</button>
+  <button data-tab="suche"><span>⌕</span>Suchen</button>
+  <button data-tab="status"><span>i</span>Status</button>
+</nav>
+<div id="toast"></div>
+<script>
+// ===== Einstellungen (MS_CLIENT_ID trage ich nach der App-Registrierung ein) =====
+const MS_CLIENT_ID = "HIER_CLIENT_ID";
+const ROOT = "Ablage";
+const SYS = ROOT + "/_System";
+const SCOPES = "Files.ReadWrite offline_access openid";
+const AUTH = "https://login.microsoftonline.com/consumers/oauth2/v2.0";
+const GRAPH = "https://graph.microsoft.com/v1.0";
+const REDIRECT = location.origin + location.pathname;
+
+// ===== kleiner Speicher (fällt still aus, wenn der Browser ihn sperrt) =====
+const store = {
+  get(k){try{return JSON.parse(localStorage.getItem(k))}catch(e){return null}},
+  set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}},
+  del(k){try{localStorage.removeItem(k)}catch(e){}}
+};
+
+// ===== Anmeldung (OAuth mit PKCE, ohne fremde Bibliothek) =====
+const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+async function anmelden(){
+  const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
+  const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+  const state = b64url(crypto.getRandomValues(new Uint8Array(12)));
+  store.set("pkce",{verifier,state});
+  location.href = AUTH + "/authorize?" + new URLSearchParams({client_id:MS_CLIENT_ID,response_type:"code",
+    redirect_uri:REDIRECT,scope:SCOPES,code_challenge:challenge,code_challenge_method:"S256",state,prompt:"select_account"});
+}
+async function tokenHolen(params){
+  const r = await fetch(AUTH + "/token",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},
+    body:new URLSearchParams({client_id:MS_CLIENT_ID,scope:SCOPES,...params})});
+  const d = await r.json();
+  if(!d.access_token) throw new Error(d.error_description || "Anmeldung fehlgeschlagen");
+  store.set("tok",{access:d.access_token,refresh:d.refresh_token,bis:Date.now()+(d.expires_in-120)*1000});
+  return d.access_token;
+}
+async function zugriff(){
+  const t = store.get("tok");
+  if(t && t.bis > Date.now()) return t.access;
+  if(t && t.refresh){ try{ return await tokenHolen({grant_type:"refresh_token",refresh_token:t.refresh}); }catch(e){} }
+  store.del("tok"); throw new Error("login");
+}
+async function rueckkehr(){
+  const q = new URLSearchParams(location.search);
+  if(!q.get("code")) return;
+  const p = store.get("pkce"); history.replaceState(null,"",REDIRECT);
+  if(!p || p.state !== q.get("state")) return;
+  await tokenHolen({grant_type:"authorization_code",code:q.get("code"),redirect_uri:REDIRECT,code_verifier:p.verifier});
+  store.del("pkce");
+}
+
+// ===== Graph =====
+const pfad = p => p.split("/").map(encodeURIComponent).join("/");
+async function g(method,url,body,typ){
+  const h = {Authorization:"Bearer " + await zugriff()};
+  if(typ) h["Content-Type"] = typ;
+  const r = await fetch(url.startsWith("http")?url:GRAPH+url,{method,headers:h,body});
+  if(r.status===401){store.del("tok");throw new Error("login")}
+  return r;
+}
+async function jsonDatei(p){ const r = await g("GET",`/me/drive/root:/${pfad(p)}:/content`); return r.ok ? r.json() : null; }
+async function schreibe(p,text){ return g("PUT",`/me/drive/root:/${pfad(p)}:/content`,text,"application/json"); }
+async function auftrag(a){
+  const name = `${Date.now()}_${a.aktion}.json`;
+  const r = await schreibe(`${SYS}/Aktionen/${name}`, JSON.stringify(a));
+  if(!r.ok) throw new Error("Auftrag konnte nicht gespeichert werden");
+}
+async function oeffnen(z){
+  let url = z.web_url;
+  if(!url && z.ablageort){ const r = await g("GET",`/me/drive/root:/${pfad(z.ablageort)}`); if(r.ok) url = (await r.json()).webUrl; }
+  if(url) window.open(url,"_blank"); else toast("Datei nicht gefunden");
+}
+async function hochladen(datei){
+  const ziel = `${ROOT}/00_Eingang/${datei.name || ("Foto_" + Date.now() + ".jpg")}`;
+  if(datei.size <= 4*1024*1024){
+    const r = await g("PUT",`/me/drive/root:/${pfad(ziel)}:/content?@microsoft.graph.conflictBehavior=rename`,datei,datei.type||"application/octet-stream");
+    if(!r.ok) throw new Error("Upload fehlgeschlagen"); return;
+  }
+  const s = await (await g("POST",`/me/drive/root:/${pfad(ziel)}:/createUploadSession`,JSON.stringify({item:{"@microsoft.graph.conflictBehavior":"rename"}}),"application/json")).json();
+  const stueck = 320*1024*16;
+  for(let i=0;i<datei.size;i+=stueck){
+    const ende = Math.min(i+stueck,datei.size);
+    const r = await fetch(s.uploadUrl,{method:"PUT",headers:{"Content-Range":`bytes ${i}-${ende-1}/${datei.size}`},body:datei.slice(i,ende)});
+    if(!r.ok && r.status!==202) throw new Error("Upload fehlgeschlagen");
+  }
+}
+
+// ===== Daten & Anzeige =====
+let daten = [], status = {}, erledigt = store.get("erledigt") || {}, tab = store.get("tab") || "offen", suche = "";
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const euro = (b,w) => b==null||b==="" ? "" : Number(b).toLocaleString("de-DE",{minimumFractionDigits:2,maximumFractionDigits:2}) + " " + (w==="EUR"||!w?"€":w);
+const datum = d => d ? new Date(String(d).slice(0,10)+"T12:00").toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit",year:"numeric"}) : "";
+const heute = new Date().toISOString().slice(0,10);
+function toast(t){ const e=$("#toast"); e.textContent=t; e.style.display="block"; clearTimeout(toast.t); toast.t=setTimeout(()=>e.style.display="none",2600); }
+
+async function laden(){
+  $("#inhalt").innerHTML = '<p class="leer">Lädt …</p>';
+  [daten, status] = await Promise.all([jsonDatei(`${SYS}/index.json`), jsonDatei(`${SYS}/status.json`)]);
+  daten = daten || []; status = status || {};
+  // erledigte Aufträge vergessen, sobald der Index sie enthält
+  for(const id of Object.keys(erledigt)){ const z = daten.find(x=>String(x.id)===id); if(!z || (erledigt[id]==="bezahlt" && z.offen!=="ja") || (erledigt[id]==="zugeordnet" && !istPruefen(z))) delete erledigt[id]; }
+  store.set("erledigt", erledigt);
+  $("#nav").hidden = false; zeigen();
+}
+const offene = () => daten.filter(z=>z.offen==="ja" && !erledigt[z.id]).sort((a,b)=>String(a.frist||"9999").localeCompare(String(b.frist||"9999")));
+const istPruefen = z => z.status==="pruefen" || (!z.status && String(z.ablageort||"").includes("/00_Eingang/Pruefen/"));
+const pruefliste = () => daten.filter(z=>istPruefen(z) && !erledigt[z.id]);
+
+function zeigen(){
+  store.set("tab",tab);
+  document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("an",b.dataset.tab===tab));
+  const o = offene().length, p = pruefliste().length;
+  $("#b-offen").hidden = !o; $("#b-offen").textContent = o;
+  $("#b-pruefen").hidden = !p; $("#b-pruefen").textContent = p;
+  ({offen:zeigeOffen,pruefen:zeigePruefen,scan:zeigeScan,suche:zeigeSuche,status:zeigeStatus})[tab]();
+}
+
+function zeigeOffen(){
+  $("#titel").textContent = "Offene Rechnungen";
+  const l = offene();
+  const summe = l.reduce((s,z)=>s+(Number(z.betrag)||0),0);
+  $("#inhalt").innerHTML = l.length ? `<p class="hinweis">${l.length} offen, zusammen ${euro(summe,"EUR")}</p>` + l.map(z=>{
+    const f = z.frist ? (z.frist < heute ? `<span class="ueber">überfällig seit ${datum(z.frist)}</span>` : `<span class="faellig">fällig ${datum(z.frist)}</span>`) : '<span class="q">ohne Frist</span>';
+    return `<div class="card"><div class="row"><div><div class="t">${esc(z.absender)}</div><div class="q">${esc(z.art)} vom ${datum(z.datum)}</div></div><div class="betrag">${euro(z.betrag,z.waehrung)}</div></div>
+      <div class="q" style="margin-top:4px">${f}</div>
+      <div class="aktionen"><button class="ghost" data-oeffnen="${esc(z.id)}">Ansehen</button><button data-bezahlt="${esc(z.id)}">Bezahlt</button></div></div>`;
+  }).join("") : '<p class="leer">Keine offenen Rechnungen 🎉</p>';
+}
+
+function ordnerVorschlaege(){
+  const s = new Set();
+  for(const z of daten){ const o = String(z.ablageort||""); if(o.startsWith(ROOT+"/") && !o.includes("/00_")) s.add(o.slice(ROOT.length+1).split("/").slice(0,-1).join("/")); }
+  return [...s].filter(Boolean).sort();
+}
+function zeigePruefen(){
+  $("#titel").textContent = "Bitte prüfen";
+  const l = pruefliste();
+  const opts = ordnerVorschlaege().map(o=>`<option value="${esc(o)}">`).join("");
+  $("#inhalt").innerHTML = (l.length ? `<p class="hinweis">Diese Dokumente konnte das System nicht sicher zuordnen. Ordner wählen oder neuen Namen eintippen, z.B. <i>07_Gesundheit/Zahnarzt</i>.</p>` : "") +
+    `<datalist id="ordner">${opts}</datalist>` + (l.length ? l.map(z=>`<div class="card">
+      <div class="t">${esc(String(z.ablageort).split("/").pop())}</div><div class="q">${esc(z.kurzinhalt||"")} · ${esc(z.quelle||"")}</div>
+      <div style="margin-top:8px"><input list="ordner" placeholder="Ordner" id="o-${esc(z.id)}"></div>
+      <div class="aktionen"><button class="ghost" data-oeffnen="${esc(z.id)}">Ansehen</button><button data-zuordnen="${esc(z.id)}">Ablegen</button></div></div>`).join("")
+    : '<p class="leer">Nichts zu prüfen</p>');
+}
+
+function zeigeScan(){
+  $("#titel").textContent = "Scannen";
+  $("#inhalt").innerHTML = `<div class="card"><div class="t">Mit der OneDrive-App scannen (empfohlen)</div>
+      <p class="hinweis">Erkennt Ränder, zieht Seiten gerade, mehrere Seiten werden ein PDF. Als Speicherort <b>Ablage › 00_Eingang</b> wählen. Name egal, das System benennt automatisch.</p>
+      <a class="btn" style="width:100%" href="ms-onedrive://">OneDrive-App öffnen</a></div>
+    <div class="card"><div class="t">Schnell ein Foto oder eine Datei</div>
+      <p class="hinweis">Für einseitige Belege oder PDFs aus anderen Apps.</p>
+      <input type="file" id="datei" accept="image/*,application/pdf" multiple>
+      <div class="aktionen"><button id="hoch">Hochladen</button></div></div>
+    <p class="hinweis">Einsortiert wird beim nächsten stündlichen Lauf.</p>`;
+}
+
+function zeigeSuche(){
+  $("#titel").textContent = "Suchen";
+  $("#inhalt").innerHTML = `<input id="q" type="search" placeholder="Absender, Art, Betrag, Jahr, Stichwort …" value="${esc(suche)}"><div id="treffer"></div>`;
+  treffer(); $("#q").addEventListener("input",e=>{suche=e.target.value;treffer()});
+}
+function treffer(){
+  const w = suche.toLowerCase().split(/\s+/).filter(Boolean);
+  let l = daten.slice().sort((a,b)=>String(b.datum||"").localeCompare(String(a.datum||"")));
+  if(w.length) l = l.filter(z=>{ const t=[z.absender,z.art,z.kurzinhalt,z.bereiche,z.ablageort,z.datum,euro(z.betrag,z.waehrung),z.betrag].join(" ").toLowerCase(); return w.every(x=>t.includes(x)); });
+  $("#treffer").innerHTML = `<p class="hinweis">${l.length} ${l.length===1?"Dokument":"Dokumente"}</p>` + l.slice(0,100).map(z=>`<div class="card" data-oeffnen="${esc(z.id)}">
+      <div class="row"><div class="t">${esc(z.absender)}</div><div class="betrag">${euro(z.betrag,z.waehrung)}</div></div>
+      <div class="q">${datum(z.datum)} · ${esc(z.art)} · ${esc(String(z.bereiche||"").split(";")[0])}${z.offen==="ja"?' · <span class="faellig">offen</span>':""}</div></div>`).join("");
+}
+
+function zeigeStatus(){
+  $("#titel").textContent = "Status";
+  const fr = (status.fehler||[]);
+  const grenze = new Date(Date.now()+21*864e5).toISOString().slice(0,10);
+  const fristen = daten.filter(z=>z.frist && z.frist>=heute && z.frist<=grenze && z.offen!=="ja").sort((a,b)=>String(a.frist).localeCompare(String(b.frist)));
+  $("#inhalt").innerHTML = `<div class="card"><div class="t">Letzter Lauf</div><div class="q">${status.letzter_lauf ? new Date(status.letzter_lauf).toLocaleString("de-DE") : "noch keiner"}</div>
+      <div class="q">${status.abgelegt_scans||0} Scans, ${status.abgelegt_mails||0} Mail-Dokumente abgelegt</div>
+      <div class="q">${daten.length} Dokumente im Index</div></div>
+    <div class="card"><div class="t">Fristen in den nächsten 3 Wochen</div>${fristen.length?fristen.map(z=>`<div class="q">${datum(z.frist)}: ${esc(z.absender)} (${esc(z.art)})</div>`).join(""):'<div class="q">keine</div>'}</div>
+    <div class="card"><div class="t">Neue Ordner (diese Woche)</div>${(status.neue_ordner_woche||[]).map(o=>`<div class="q">${esc(o)}</div>`).join("")||'<div class="q">keine</div>'}</div>
+    <div class="card"><div class="t ${fr.length?"":"ok"}">${fr.length?"Fehler beim letzten Lauf":"Keine Fehler"}</div>${fr.map(f=>`<div class="q">${esc(f)}</div>`).join("")}</div>
+    <div class="aktionen"><button class="ghost" id="abmelden">Abmelden</button></div>`;
+}
+
+// ===== Klicks =====
+document.addEventListener("click", async e=>{
+  const t = e.target.closest("[data-tab],[data-bezahlt],[data-zuordnen],[data-oeffnen],#hoch,#abmelden,#neu,#login");
+  if(!t) return;
+  try{
+    if(t.dataset.tab){ tab=t.dataset.tab; zeigen(); }
+    else if(t.dataset.bezahlt){
+      t.disabled = true; const z = daten.find(x=>String(x.id)===t.dataset.bezahlt);
+      await auftrag({aktion:"bezahlt",id:z.id,datum:heute});
+      erledigt[z.id]="bezahlt"; store.set("erledigt",erledigt); toast(`${z.absender} als bezahlt markiert`); zeigen();
+    }
+    else if(t.dataset.zuordnen){
+      const id = t.dataset.zuordnen, o = $("#o-"+CSS.escape(id)).value.trim();
+      if(!o){ toast("Bitte einen Ordner wählen"); return; }
+      t.disabled = true; await auftrag({aktion:"zuordnen",id,ordner:o});
+      erledigt[id]="zugeordnet"; store.set("erledigt",erledigt); toast("Wird beim nächsten Lauf abgelegt"); zeigen();
+    }
+    else if(t.dataset.oeffnen){ await oeffnen(daten.find(x=>String(x.id)===t.dataset.oeffnen)); }
+    else if(t.id==="hoch"){
+      const fs = [...$("#datei").files]; if(!fs.length){ toast("Bitte Datei wählen"); return; }
+      t.disabled = true; t.textContent = "Lädt hoch …";
+      for(const f of fs) await hochladen(f);
+      toast(`${fs.length} Datei(en) im Eingang`); zeigeScan();
+    }
+    else if(t.id==="abmelden"){ store.del("tok"); location.reload(); }
+    else if(t.id==="neu"){ await laden(); }
+    else if(t.id==="login"){ await anmelden(); }
+  }catch(err){ if(err.message==="login") zeigeLogin(); else { toast(err.message); t.disabled=false; } }
+});
+
+function zeigeLogin(){
+  $("#nav").hidden = true; $("#titel").textContent = "Dokumente";
+  $("#inhalt").innerHTML = `<div class="card"><p>Melde dich mit deinem Microsoft-Konto an, damit die App auf deine Ablage in OneDrive zugreifen kann.</p><button id="login" style="width:100%">Mit Microsoft anmelden</button></div>`;
+}
+
+(async()=>{
+  try{ await rueckkehr(); await zugriff(); await laden(); }
+  catch(e){ e.message==="login" ? zeigeLogin() : ($("#inhalt").innerHTML = `<p class="leer">${esc(e.message)}</p>`); }
+})();
+</script>
+</body>
+</html>
