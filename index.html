@@ -213,16 +213,35 @@ function zeigeScan(){
 
 function zeigeSuche(){
   $("#titel").textContent = "Suchen";
-  $("#inhalt").innerHTML = `<input id="q" type="search" placeholder="Absender, Art, Betrag, Jahr, Stichwort …" value="${esc(suche)}"><div id="treffer"></div>`;
-  treffer(); $("#q").addEventListener("input",e=>{suche=e.target.value;treffer()});
+  $("#inhalt").innerHTML = `<input id="q" type="search" placeholder="Stichwort, Absender, Betrag, Jahr …" value="${esc(suche)}"><div id="treffer"></div><div id="volltext"></div>`;
+  treffer(); volltext();
+  $("#q").addEventListener("input",e=>{suche=e.target.value;treffer();clearTimeout(volltext.t);volltext.t=setTimeout(volltext,500)});
 }
 function treffer(){
   const w = suche.toLowerCase().split(/\s+/).filter(Boolean);
   let l = daten.slice().sort((a,b)=>String(b.datum||"").localeCompare(String(a.datum||"")));
-  if(w.length) l = l.filter(z=>{ const t=[z.absender,z.art,z.kurzinhalt,z.bereiche,z.ablageort,z.datum,euro(z.betrag,z.waehrung),z.betrag].join(" ").toLowerCase(); return w.every(x=>t.includes(x)); });
-  $("#treffer").innerHTML = `<p class="hinweis">${l.length} ${l.length===1?"Dokument":"Dokumente"}</p>` + l.slice(0,100).map(z=>`<div class="card" data-oeffnen="${esc(z.id)}">
+  if(w.length) l = l.filter(z=>{ const t=[z.absender,z.art,z.kurzinhalt,z.schlagworte,z.bereiche,z.ablageort,z.datum,euro(z.betrag,z.waehrung),z.betrag].join(" ").toLowerCase(); return w.every(x=>t.includes(x)); });
+  treffer.namen = new Set(l.map(z=>String(z.ablageort||"").split("/").pop()));
+  $("#treffer").innerHTML = `<p class="hinweis">${l.length} ${l.length===1?"Dokument":"Dokumente"} in der Ablage</p>` + l.slice(0,100).map(z=>`<div class="card" data-oeffnen="${esc(z.id)}">
       <div class="row"><div class="t">${esc(z.absender)}</div><div class="betrag">${euro(z.betrag,z.waehrung)}</div></div>
       <div class="q">${datum(z.datum)} · ${esc(z.art)} · ${esc(String(z.bereiche||"").split(";")[0])}${z.offen==="ja"?' · <span class="faellig">offen</span>':""}</div></div>`).join("");
+}
+// Volltextsuche: Google Drive durchsucht den Inhalt der PDFs (auch gescannte, per Texterkennung)
+async function volltext(){
+  const ziel = $("#volltext"); if(!ziel) return;
+  const w = suche.trim().split(/\s+/).filter(x=>x.length>1);
+  if(!w.length){ ziel.innerHTML = ""; return; }
+  const frage = suche;
+  ziel.innerHTML = `<p class="hinweis">Suche im Inhalt der Dokumente …</p>`;
+  try{
+    const q = w.map(x=>`fullText contains '${qs(x)}'`).join(" and ") +
+      " and trashed = false and mimeType != 'application/vnd.google-apps.folder' and mimeType != 'application/vnd.google-apps.shortcut'";
+    const r = await g("GET","/files?"+new URLSearchParams({q,pageSize:"50",fields:"files(id,name,webViewLink,modifiedTime)"}));
+    if(frage !== suche) return;
+    const f = r.ok ? ((await r.json()).files || []).filter(x=>!treffer.namen.has(x.name) && !x.name.endsWith(".json") && !x.name.endsWith(".xlsx")) : [];
+    ziel.innerHTML = f.length ? `<p class="hinweis">Außerdem im Inhalt gefunden (${f.length})</p>` + f.map(x=>`<a class="card" style="display:block;color:inherit;text-decoration:none" href="${esc(x.webViewLink)}" target="_blank">
+        <div class="t">${esc(x.name)}</div></a>`).join("") : "";
+  }catch(e){ if(e.message==="login") zeigeLogin(); else ziel.innerHTML = ""; }
 }
 
 function zeigeStatus(){
