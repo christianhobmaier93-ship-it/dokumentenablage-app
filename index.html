@@ -49,13 +49,16 @@ nav span{display:block;font-size:20px;line-height:1.2}
 </nav>
 <div id="toast"></div>
 <script>
-// ===== Einstellungen (MS_CLIENT_ID trage ich nach der App-Registrierung ein) =====
-const MS_CLIENT_ID = "57e638ad-ab26-425b-b9f1-d61e4bfbfb81";
+// ===== Einstellungen =====
+// Client-ID des OAuth-Clients "Webanwendung" aus Google Cloud (nicht geheim)
+const GOOGLE_CLIENT_ID = "528580000059-1cfkdijq0garkpno2qlepod10llf6cm0.apps.googleusercontent.com";
 const ROOT = "Ablage";
 const SYS = ROOT + "/_System";
-const SCOPES = "Files.ReadWrite offline_access openid";
-const AUTH = "https://login.microsoftonline.com/consumers/oauth2/v2.0";
-const GRAPH = "https://graph.microsoft.com/v1.0";
+const SCOPES = "https://www.googleapis.com/auth/drive";
+const AUTH = "https://accounts.google.com/o/oauth2/v2/auth";
+const DRIVE = "https://www.googleapis.com/drive/v3";
+const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
+const ORDNER = "application/vnd.google-apps.folder";
 const REDIRECT = location.origin + location.pathname;
 
 // ===== kleiner Speicher (fällt still aus, wenn der Browser ihn sperrt) =====
@@ -65,73 +68,75 @@ const store = {
   del(k){try{localStorage.removeItem(k)}catch(e){}}
 };
 
-// ===== Anmeldung (OAuth mit PKCE, ohne fremde Bibliothek) =====
-const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
-async function anmelden(){
-  const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
-  const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
-  const state = b64url(crypto.getRandomValues(new Uint8Array(12)));
-  store.set("pkce",{verifier,state});
-  location.href = AUTH + "/authorize?" + new URLSearchParams({client_id:MS_CLIENT_ID,response_type:"code",
-    redirect_uri:REDIRECT,scope:SCOPES,code_challenge:challenge,code_challenge_method:"S256",state,prompt:"select_account"});
-}
-async function tokenHolen(params){
-  const r = await fetch(AUTH + "/token",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},
-    body:new URLSearchParams({client_id:MS_CLIENT_ID,scope:SCOPES,...params})});
-  const d = await r.json();
-  if(!d.access_token) throw new Error(d.error_description || "Anmeldung fehlgeschlagen");
-  store.set("tok",{access:d.access_token,refresh:d.refresh_token,bis:Date.now()+(d.expires_in-120)*1000});
-  return d.access_token;
+// ===== Anmeldung bei Google (ohne fremde Bibliothek) =====
+// Google gibt Browser-Apps einen Zugang für 1 Stunde; danach genügt ein Tipp auf "Anmelden".
+const zufall = () => Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>b.toString(16).padStart(2,"0")).join("");
+function anmelden(){
+  const state = zufall(); store.set("state", state);
+  location.href = AUTH + "?" + new URLSearchParams({client_id:GOOGLE_CLIENT_ID,response_type:"token",
+    redirect_uri:REDIRECT,scope:SCOPES,state,include_granted_scopes:"true"});
 }
 async function zugriff(){
   const t = store.get("tok");
   if(t && t.bis > Date.now()) return t.access;
-  if(t && t.refresh){ try{ return await tokenHolen({grant_type:"refresh_token",refresh_token:t.refresh}); }catch(e){} }
   store.del("tok"); throw new Error("login");
 }
 async function rueckkehr(){
-  const q = new URLSearchParams(location.search);
-  if(!q.get("code")) return;
-  const p = store.get("pkce"); history.replaceState(null,"",REDIRECT);
-  if(!p || p.state !== q.get("state")) return;
-  await tokenHolen({grant_type:"authorization_code",code:q.get("code"),redirect_uri:REDIRECT,code_verifier:p.verifier});
-  store.del("pkce");
+  if(!location.hash.includes("access_token")) return;
+  const q = new URLSearchParams(location.hash.slice(1));
+  history.replaceState(null,"",REDIRECT);
+  if(q.get("state") !== store.get("state")) return;
+  if(!String(q.get("scope")||"").includes("auth/drive")) throw new Error("Bitte bei der Anmeldung den Zugriff auf Google Drive erlauben (Häkchen setzen).");
+  store.set("tok",{access:q.get("access_token"),bis:Date.now()+(Number(q.get("expires_in")||3600)-120)*1000});
+  store.del("state");
 }
 
-// ===== Graph =====
-const pfad = p => p.split("/").map(encodeURIComponent).join("/");
+// ===== Google Drive =====
 async function g(method,url,body,typ){
   const h = {Authorization:"Bearer " + await zugriff()};
   if(typ) h["Content-Type"] = typ;
-  const r = await fetch(url.startsWith("http")?url:GRAPH+url,{method,headers:h,body});
+  const r = await fetch(url.startsWith("http")?url:DRIVE+url,{method,headers:h,body});
   if(r.status===401){store.del("tok");throw new Error("login")}
   return r;
 }
-async function jsonDatei(p){ const r = await g("GET",`/me/drive/root:/${pfad(p)}:/content`); return r.ok ? r.json() : null; }
-async function schreibe(p,text){ return g("PUT",`/me/drive/root:/${pfad(p)}:/content`,text,"application/json"); }
+const qs = s => String(s).replace(/\\/g,"\\\\").replace(/'/g,"\\'");
+const ids = {"": "root"};
+async function kind(elternId,name){
+  const r = await g("GET","/files?"+new URLSearchParams({q:`'${elternId}' in parents and name = '${qs(name)}' and trashed = false`,
+    fields:"files(id,name,mimeType,webViewLink)",pageSize:"10"}));
+  if(!r.ok) return null;
+  const f = (await r.json()).files || [];
+  f.sort((a,b)=>(a.mimeType!==ORDNER)-(b.mimeType!==ORDNER));
+  return f[0] || null;
+}
+async function finde(p){   // Pfad -> Datei/Ordner oder null
+  p = p.replace(/^\/+|\/+$/g,"");
+  const i = p.lastIndexOf("/"), eltern = i<0 ? "" : p.slice(0,i), name = p.slice(i+1);
+  if(!(eltern in ids)){ const e = await finde(eltern); if(!e) return null; ids[eltern] = e.id; }
+  return kind(ids[eltern], name);
+}
+async function jsonDatei(p){
+  const f = await finde(p); if(!f) return null;
+  const r = await g("GET",`/files/${f.id}?alt=media`); return r.ok ? r.json() : null;
+}
+async function neueDatei(ordnerPfad,name,inhalt,typ){
+  const o = await finde(ordnerPfad); if(!o) throw new Error(`Ordner ${ordnerPfad} fehlt in Google Drive`);
+  const grenze = "x" + zufall();
+  const body = new Blob([`--${grenze}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`,
+    JSON.stringify({name,parents:[o.id]}), `\r\n--${grenze}\r\nContent-Type: ${typ}\r\n\r\n`, inhalt, `\r\n--${grenze}--`]);
+  const r = await g("POST",`${UPLOAD}?uploadType=multipart&fields=id`,body,`multipart/related; boundary=${grenze}`);
+  if(!r.ok) throw new Error("Upload fehlgeschlagen");
+}
 async function auftrag(a){
-  const name = `${Date.now()}_${a.aktion}.json`;
-  const r = await schreibe(`${SYS}/Aktionen/${name}`, JSON.stringify(a));
-  if(!r.ok) throw new Error("Auftrag konnte nicht gespeichert werden");
+  await neueDatei(`${SYS}/Aktionen`, `${Date.now()}_${a.aktion}.json`, JSON.stringify(a), "application/json");
 }
 async function oeffnen(z){
   let url = z.web_url;
-  if(!url && z.ablageort){ const r = await g("GET",`/me/drive/root:/${pfad(z.ablageort)}`); if(r.ok) url = (await r.json()).webUrl; }
+  if(!url && z.ablageort){ const f = await finde(String(z.ablageort)); if(f) url = f.webViewLink; }
   if(url) window.open(url,"_blank"); else toast("Datei nicht gefunden");
 }
 async function hochladen(datei){
-  const ziel = `${ROOT}/00_Eingang/${datei.name || ("Foto_" + Date.now() + ".jpg")}`;
-  if(datei.size <= 4*1024*1024){
-    const r = await g("PUT",`/me/drive/root:/${pfad(ziel)}:/content?@microsoft.graph.conflictBehavior=rename`,datei,datei.type||"application/octet-stream");
-    if(!r.ok) throw new Error("Upload fehlgeschlagen"); return;
-  }
-  const s = await (await g("POST",`/me/drive/root:/${pfad(ziel)}:/createUploadSession`,JSON.stringify({item:{"@microsoft.graph.conflictBehavior":"rename"}}),"application/json")).json();
-  const stueck = 320*1024*16;
-  for(let i=0;i<datei.size;i+=stueck){
-    const ende = Math.min(i+stueck,datei.size);
-    const r = await fetch(s.uploadUrl,{method:"PUT",headers:{"Content-Range":`bytes ${i}-${ende-1}/${datei.size}`},body:datei.slice(i,ende)});
-    if(!r.ok && r.status!==202) throw new Error("Upload fehlgeschlagen");
-  }
+  await neueDatei(`${ROOT}/00_Eingang`, datei.name || ("Foto_" + Date.now() + ".jpg"), datei, datei.type || "application/octet-stream");
 }
 
 // ===== Daten & Anzeige =====
@@ -196,9 +201,9 @@ function zeigePruefen(){
 
 function zeigeScan(){
   $("#titel").textContent = "Scannen";
-  $("#inhalt").innerHTML = `<div class="card"><div class="t">Mit der OneDrive-App scannen (empfohlen)</div>
+  $("#inhalt").innerHTML = `<div class="card"><div class="t">Mit der Google-Drive-App scannen (empfohlen)</div>
       <p class="hinweis">Erkennt Ränder, zieht Seiten gerade, mehrere Seiten werden ein PDF. Als Speicherort <b>Ablage › 00_Eingang</b> wählen. Name egal, das System benennt automatisch.</p>
-      <a class="btn" style="width:100%" href="ms-onedrive://">OneDrive-App öffnen</a></div>
+      <a class="btn" style="width:100%" href="googledrive://">Google-Drive-App öffnen</a></div>
     <div class="card"><div class="t">Schnell ein Foto oder eine Datei</div>
       <p class="hinweis">Für einseitige Belege oder PDFs aus anderen Apps.</p>
       <input type="file" id="datei" accept="image/*,application/pdf" multiple>
@@ -266,7 +271,7 @@ document.addEventListener("click", async e=>{
 
 function zeigeLogin(){
   $("#nav").hidden = true; $("#titel").textContent = "Dokumente";
-  $("#inhalt").innerHTML = `<div class="card"><p>Melde dich mit deinem Microsoft-Konto an, damit die App auf deine Ablage in OneDrive zugreifen kann.</p><button id="login" style="width:100%">Mit Microsoft anmelden</button></div>`;
+  $("#inhalt").innerHTML = `<div class="card"><p>Melde dich mit deinem Google-Konto an, damit die App auf deine Ablage in Google Drive zugreifen kann. Die Anmeldung gilt jeweils eine Stunde.</p><button id="login" style="width:100%">Mit Google anmelden</button></div>`;
 }
 
 (async()=>{
