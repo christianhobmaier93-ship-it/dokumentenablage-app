@@ -52,6 +52,7 @@ nav span{display:block;font-size:20px;line-height:1.2}
 // ===== Einstellungen =====
 // Client-ID des OAuth-Clients "Webanwendung" aus Google Cloud (nicht geheim)
 const GOOGLE_CLIENT_ID = "528580000059-1cfkdijq0garkpno2qlepod10llf6cm0.apps.googleusercontent.com";
+const VERSION = "2026-11-24c";
 const ROOT = "Ablage";
 const SYS = ROOT + "/_System";
 const SCOPES = "https://www.googleapis.com/auth/drive";
@@ -329,6 +330,11 @@ document.addEventListener("visibilitychange", ()=>{
   const t = store.get("tok");
   if(!t || t.bis < Date.now()) zeigeLogin(); else laden().catch(e=>{ if(e.message==="login") zeigeLogin(); else zeigeFehler(e.message); });
 });
+// Neue App-Version sofort laden (Safari hält die Seite sonst bis zu 10 Minuten im Zwischenspeicher)
+fetch(REDIRECT+"?v="+Date.now(),{cache:"no-store"}).then(r=>r.text()).then(t=>{
+  const m = t.match(/const VERSION = "([^"]+)"/);
+  if(m && m[1]!==VERSION && location.search!=="?v="+m[1]) location.replace(REDIRECT+"?v="+m[1]);
+}).catch(()=>{});
 window.addEventListener("error", e=>toast("Fehler: "+e.message));
 window.addEventListener("unhandledrejection", e=>{ if(e.reason && e.reason.message!=="login") toast("Fehler: "+(e.reason.message||e.reason)); });
 (async()=>{
