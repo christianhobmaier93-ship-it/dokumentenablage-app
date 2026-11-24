@@ -71,10 +71,10 @@ const store = {
 // ===== Anmeldung bei Google (ohne fremde Bibliothek) =====
 // Google gibt Browser-Apps einen Zugang für 1 Stunde; danach genügt ein Tipp auf "Anmelden".
 const zufall = () => Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>b.toString(16).padStart(2,"0")).join("");
-function anmelden(){
+function anmelden(waehlen){
   const state = zufall(); store.set("state", state);
   location.href = AUTH + "?" + new URLSearchParams({client_id:GOOGLE_CLIENT_ID,response_type:"token",
-    redirect_uri:REDIRECT,scope:SCOPES,state,include_granted_scopes:"true"});
+    redirect_uri:REDIRECT,scope:SCOPES,state,include_granted_scopes:"true",...(waehlen?{prompt:"select_account consent"}:{})});
 }
 async function zugriff(){
   const t = store.get("tok");
@@ -87,7 +87,7 @@ async function rueckkehr(){
   history.replaceState(null,"",REDIRECT);
   if(q.get("state") !== store.get("state")) return;
   if(!String(q.get("scope")||"").includes("auth/drive")) throw new Error("Bitte bei der Anmeldung den Zugriff auf Google Drive erlauben (Häkchen setzen).");
-  store.set("tok",{access:q.get("access_token"),bis:Date.now()+(Number(q.get("expires_in")||3600)-120)*1000});
+  store.set("scope", q.get("scope")); store.set("tok",{access:q.get("access_token"),bis:Date.now()+(Number(q.get("expires_in")||3600)-120)*1000});
   store.del("state"); store.set("angemeldet", true);
 }
 
@@ -157,12 +157,30 @@ function toast(t){ const e=$("#toast"); e.textContent=t; e.style.display="block"
 async function laden(){
   $("#inhalt").innerHTML = '<p class="leer">Lädt …</p>';
   [daten, status] = await Promise.all([jsonDatei(`${SYS}/index.json`), jsonDatei(`${SYS}/status.json`)]);
-  if(!daten){ daten = []; throw new Error("Der Index (Ablage/_System/index.json) konnte nicht geladen werden. Bitte unter Status abmelden und neu anmelden."); }
   status = status || {};
+  if(!daten) daten = await perSuche("index.json");
+  if(!daten){ daten = []; throw new Error(await diagnose()); }
   // erledigte Aufträge vergessen, sobald der Index sie enthält
   for(const id of Object.keys(erledigt)){ const z = daten.find(x=>String(x.id)===id); if(!z || (erledigt[id]==="bezahlt" && z.offen!=="ja") || (erledigt[id]==="zugeordnet" && !istPruefen(z))) delete erledigt[id]; }
   store.set("erledigt", erledigt);
   $("#nav").hidden = false; zeigen();
+}
+// Rückfall: Datei per Namen irgendwo im Drive suchen (falls der Pfad nicht aufgelöst werden kann)
+async function perSuche(name){
+  const r = await g("GET","/files?"+new URLSearchParams({q:`name = '${qs(name)}' and trashed = false`,
+    fields:"files(id,parents,modifiedTime)",orderBy:"modifiedTime desc",pageSize:"10"}));
+  if(!r.ok) throw new Error(await fehlertext(r));
+  const f = (await r.json()).files || []; if(!f.length) return null;
+  const d = await g("GET",`/files/${f[0].id}?alt=media`);
+  if(!d.ok) throw new Error(await fehlertext(d));
+  return d.json();
+}
+async function diagnose(){
+  let konto = "unbekannt";
+  try{ const r = await g("GET","/about?fields=user(emailAddress)"); if(r.ok) konto = (await r.json()).user.emailAddress; }catch(e){}
+  const schritte = [];
+  for(const p of [ROOT, SYS, SYS+"/index.json"]){ let f=null; try{ f = await finde(p); }catch(e){} schritte.push(`${p}: ${f?"gefunden":"nicht gefunden"}`); if(!f) break; }
+  return `Der Index konnte nicht geladen werden. Angemeldet als: ${konto}. Berechtigung: ${store.get("scope")||"?"}. ${schritte.join(" · ")}. Falls das das falsche Google-Konto ist: unter Status abmelden und mit dem richtigen Konto anmelden.`;
 }
 const offene = () => daten.filter(z=>z.offen==="ja" && !erledigt[z.id]).sort((a,b)=>String(a.frist||"9999").localeCompare(String(b.frist||"9999")));
 const istPruefen = z => z.status==="pruefen" || (!z.status && String(z.ablageort||"").includes("/00_Eingang/Pruefen/"));
@@ -291,7 +309,7 @@ document.addEventListener("click", async e=>{
     }
     else if(t.id==="abmelden"){ store.del("tok"); store.del("angemeldet"); location.reload(); }
     else if(t.id==="neu"){ await laden(); }
-    else if(t.id==="login"){ await anmelden(); }
+    else if(t.id==="login"){ await anmelden(true); }
   }catch(err){ if(err.message==="login") zeigeLogin(); else { toast(err.message); t.disabled=false; } }
 });
 
