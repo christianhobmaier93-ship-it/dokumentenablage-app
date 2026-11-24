@@ -88,7 +88,7 @@ async function rueckkehr(){
   if(q.get("state") !== store.get("state")) return;
   if(!String(q.get("scope")||"").includes("auth/drive")) throw new Error("Bitte bei der Anmeldung den Zugriff auf Google Drive erlauben (Häkchen setzen).");
   store.set("tok",{access:q.get("access_token"),bis:Date.now()+(Number(q.get("expires_in")||3600)-120)*1000});
-  store.del("state");
+  store.del("state"); store.set("angemeldet", true);
 }
 
 // ===== Google Drive =====
@@ -99,12 +99,16 @@ async function g(method,url,body,typ){
   if(r.status===401){store.del("tok");throw new Error("login")}
   return r;
 }
+async function fehlertext(r){
+  let m = ""; try{ m = (await r.json()).error.message }catch(e){}
+  return `Google Drive meldet Fehler ${r.status}${m?": "+m:""}`;
+}
 const qs = s => String(s).replace(/\\/g,"\\\\").replace(/'/g,"\\'");
 const ids = {"": "root"};
 async function kind(elternId,name){
   const r = await g("GET","/files?"+new URLSearchParams({q:`'${elternId}' in parents and name = '${qs(name)}' and trashed = false`,
-    fields:"files(id,name,mimeType,webViewLink)",pageSize:"10"}));
-  if(!r.ok) return null;
+    fields:"files(id,name,mimeType,webViewLink,modifiedTime)",orderBy:"modifiedTime desc",pageSize:"10"}));
+  if(!r.ok) throw new Error(await fehlertext(r));
   const f = (await r.json()).files || [];
   f.sort((a,b)=>(a.mimeType!==ORDNER)-(b.mimeType!==ORDNER));
   return f[0] || null;
@@ -117,7 +121,9 @@ async function finde(p){   // Pfad -> Datei/Ordner oder null
 }
 async function jsonDatei(p){
   const f = await finde(p); if(!f) return null;
-  const r = await g("GET",`/files/${f.id}?alt=media`); return r.ok ? r.json() : null;
+  const r = await g("GET",`/files/${f.id}?alt=media`);
+  if(!r.ok) throw new Error(await fehlertext(r));
+  return r.json();
 }
 async function neueDatei(ordnerPfad,name,inhalt,typ){
   const o = await finde(ordnerPfad); if(!o) throw new Error(`Ordner ${ordnerPfad} fehlt in Google Drive`);
@@ -151,7 +157,8 @@ function toast(t){ const e=$("#toast"); e.textContent=t; e.style.display="block"
 async function laden(){
   $("#inhalt").innerHTML = '<p class="leer">Lädt …</p>';
   [daten, status] = await Promise.all([jsonDatei(`${SYS}/index.json`), jsonDatei(`${SYS}/status.json`)]);
-  daten = daten || []; status = status || {};
+  if(!daten){ daten = []; throw new Error("Der Index (Ablage/_System/index.json) konnte nicht geladen werden. Bitte unter Status abmelden und neu anmelden."); }
+  status = status || {};
   // erledigte Aufträge vergessen, sobald der Index sie enthält
   for(const id of Object.keys(erledigt)){ const z = daten.find(x=>String(x.id)===id); if(!z || (erledigt[id]==="bezahlt" && z.offen!=="ja") || (erledigt[id]==="zugeordnet" && !istPruefen(z))) delete erledigt[id]; }
   store.set("erledigt", erledigt);
@@ -282,17 +289,27 @@ document.addEventListener("click", async e=>{
       for(const f of fs) await hochladen(f);
       toast(`${fs.length} Datei(en) im Eingang`); zeigeScan();
     }
-    else if(t.id==="abmelden"){ store.del("tok"); location.reload(); }
+    else if(t.id==="abmelden"){ store.del("tok"); store.del("angemeldet"); location.reload(); }
     else if(t.id==="neu"){ await laden(); }
     else if(t.id==="login"){ await anmelden(); }
   }catch(err){ if(err.message==="login") zeigeLogin(); else { toast(err.message); t.disabled=false; } }
 });
 
 function zeigeLogin(){
+  // Abgelaufene Anmeldung (gilt 1 Stunde) still erneuern: kurz zu Google und zurück
+  const zuletzt = store.get("auto") || 0;
+  if(store.get("angemeldet") && Date.now() - zuletzt > 120000){ store.set("auto", Date.now()); anmelden(); return; }
   $("#nav").hidden = true; $("#titel").textContent = "Dokumente";
   $("#inhalt").innerHTML = `<div class="card"><p>Melde dich mit deinem Google-Konto an, damit die App auf deine Ablage in Google Drive zugreifen kann. Die Anmeldung gilt jeweils eine Stunde.</p><button id="login" style="width:100%">Mit Google anmelden</button></div>`;
 }
 
+document.addEventListener("visibilitychange", ()=>{
+  if(document.hidden) return;
+  const t = store.get("tok");
+  if(!t || t.bis < Date.now()) zeigeLogin(); else laden().catch(e=>{ if(e.message==="login") zeigeLogin(); else $("#inhalt").innerHTML = `<p class="leer">${esc(e.message)}</p>`; });
+});
+window.addEventListener("error", e=>toast("Fehler: "+e.message));
+window.addEventListener("unhandledrejection", e=>{ if(e.reason && e.reason.message!=="login") toast("Fehler: "+(e.reason.message||e.reason)); });
 (async()=>{
   try{ await rueckkehr(); await zugriff(); await laden(); }
   catch(e){ e.message==="login" ? zeigeLogin() : ($("#inhalt").innerHTML = `<p class="leer">${esc(e.message)}</p>`); }
