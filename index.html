@@ -180,7 +180,7 @@ async function diagnose(){
   try{ const r = await g("GET","/about?fields=user(emailAddress)"); if(r.ok) konto = (await r.json()).user.emailAddress; }catch(e){}
   const schritte = [];
   for(const p of [ROOT, SYS, SYS+"/index.json"]){ let f=null; try{ f = await finde(p); }catch(e){} schritte.push(`${p}: ${f?"gefunden":"nicht gefunden"}`); if(!f) break; }
-  return `Der Index konnte nicht geladen werden. Angemeldet als: ${konto}. Berechtigung: ${store.get("scope")||"?"}. ${schritte.join(" · ")}. Falls das das falsche Google-Konto ist: unter Status abmelden und mit dem richtigen Konto anmelden.`;
+  return `Der Index konnte nicht geladen werden. Angemeldet als: ${konto}. Berechtigung: ${store.get("scope")||"?"}. ${schritte.join(" · ")}. Falls das das falsche Google-Konto ist: unten abmelden und mit dem richtigen Konto anmelden.`;
 }
 const offene = () => daten.filter(z=>z.offen==="ja" && !erledigt[z.id]).sort((a,b)=>String(a.frist||"9999").localeCompare(String(b.frist||"9999")));
 const istPruefen = z => z.status==="pruefen" || (!z.status && String(z.ablageort||"").includes("/00_Eingang/Pruefen/"));
@@ -313,6 +313,9 @@ document.addEventListener("click", async e=>{
   }catch(err){ if(err.message==="login") zeigeLogin(); else { toast(err.message); t.disabled=false; } }
 });
 
+function zeigeFehler(t){
+  $("#inhalt").innerHTML = `<p class="leer">${esc(t)}</p><div class="card"><button id="abmelden" style="width:100%">Abmelden und neu anmelden</button></div>`;
+}
 function zeigeLogin(){
   // Abgelaufene Anmeldung (gilt 1 Stunde) still erneuern: kurz zu Google und zurück
   const zuletzt = store.get("auto") || 0;
@@ -324,13 +327,13 @@ function zeigeLogin(){
 document.addEventListener("visibilitychange", ()=>{
   if(document.hidden) return;
   const t = store.get("tok");
-  if(!t || t.bis < Date.now()) zeigeLogin(); else laden().catch(e=>{ if(e.message==="login") zeigeLogin(); else $("#inhalt").innerHTML = `<p class="leer">${esc(e.message)}</p>`; });
+  if(!t || t.bis < Date.now()) zeigeLogin(); else laden().catch(e=>{ if(e.message==="login") zeigeLogin(); else zeigeFehler(e.message); });
 });
 window.addEventListener("error", e=>toast("Fehler: "+e.message));
 window.addEventListener("unhandledrejection", e=>{ if(e.reason && e.reason.message!=="login") toast("Fehler: "+(e.reason.message||e.reason)); });
 (async()=>{
   try{ await rueckkehr(); await zugriff(); await laden(); }
-  catch(e){ e.message==="login" ? zeigeLogin() : ($("#inhalt").innerHTML = `<p class="leer">${esc(e.message)}</p>`); }
+  catch(e){ e.message==="login" ? zeigeLogin() : (zeigeFehler(e.message)); }
 })();
 </script>
 </body>
